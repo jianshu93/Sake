@@ -1,0 +1,2 @@
+# Sake: Rapid and Scalable Genome Search with On-disk Indexes
+Sake (pronouced as Sah-key) is a lightning-fast and space-efficient genome search index based on DiskANN and b-bit One Permutation MinHash. I coded most of it when drinking Sake.
