@@ -354,6 +354,7 @@ fn sanity_check_index_mapping(
 }
 
 fn main() {
+    println!("\n ************** initializing logger *****************\n");
     let _ = env_logger::Builder::from_default_env().try_init();
 
     let matches = Command::new("sake")
