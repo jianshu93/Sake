@@ -6,6 +6,7 @@
 // Files per prefix:
 //   <prefix>.diskann       : DiskANN index file (vectors are u16)
 //   <prefix>.genomes.txt   : genome file paths in EXACT vector-id order (0..n-1)
+//   <prefix>.idmap.tsv     : TSV mapping vector_id -> genome path (same order)
 //   <prefix>.params.json   : parameters used to build/sketch
 //
 // Commands:
@@ -13,35 +14,28 @@
 //   search     : search query genomes against an existing index
 
 use clap::{Arg, ArgAction, Command};
+use needletail::{parse_fastx_file, Sequence};
+use num;
+use num_traits::{NumCast, PrimInt, ToPrimitive};
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
-use needletail::Sequence;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::sync::Once;
-
-use needletail::parse_fastx_file;
-
-use num;
+use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 use kmerutils::base::{
     alphabet::Alphabet2b,
     kmergenerator::*,
     sequence::Sequence as SequenceStruct,
-    CompressedKmerT,
-    Kmer16b32bit,
-    Kmer32bit,
-    Kmer64bit,
-    KmerBuilder,
+    CompressedKmerT, Kmer16b32bit, Kmer32bit, Kmer64bit, KmerBuilder,
 };
 use kmerutils::sketcharg::{DataType, SeqSketcherParams, SketchAlgo};
 use kmerutils::sketching::setsketchert::{OptDensHashSketch, RevOptDensHashSketch, SeqSketcherT};
 
 use anndists::dist::DistHamming;
 use rust_diskann::{DiskANN, DiskAnnParams};
-use num_traits::{NumCast, PrimInt, ToPrimitive};
-use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 static INIT_RAYON: Once = Once::new();
 
@@ -75,7 +69,7 @@ fn read_list_file(filepath: &str) -> Vec<String> {
         .collect()
 }
 
-/// Write genome list file in exact order
+/// Write genome list file in exact order.
 fn write_genome_list(filepath: &str, genomes: &[String]) -> io::Result<()> {
     let mut w = BufWriter::new(File::create(filepath)?);
     for g in genomes {
@@ -84,9 +78,18 @@ fn write_genome_list(filepath: &str, genomes: &[String]) -> io::Result<()> {
     Ok(())
 }
 
-/// Read genome list file in exact order
+/// Read genome list file in exact order.
 fn read_genome_list(filepath: &str) -> io::Result<Vec<String>> {
     Ok(read_list_file(filepath))
+}
+
+/// Write idmap TSV: `vector_id<TAB>genome_path`
+fn write_idmap_tsv(filepath: &str, genomes: &[String]) -> io::Result<()> {
+    let mut w = BufWriter::new(File::create(filepath)?);
+    for (i, g) in genomes.iter().enumerate() {
+        writeln!(w, "{}\t{}", i, g)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +109,9 @@ struct PrefixParams {
     sketch_elem_size: u8,
     sketch_elem_type: String,
     distance: String,
+
+    // hash seed (must match between build/search)
+    hash_seed: u64,
 }
 
 fn params_path(prefix: &str) -> String {
@@ -116,6 +122,19 @@ fn index_path(prefix: &str) -> String {
 }
 fn genomes_path(prefix: &str) -> String {
     format!("{prefix}.genomes.txt")
+}
+fn idmap_path(prefix: &str) -> String {
+    format!("{prefix}.idmap.tsv")
+}
+
+fn save_params(prefix: &str, p: &PrefixParams) -> io::Result<()> {
+    let s = serde_json::to_string_pretty(p).unwrap();
+    fs::write(params_path(prefix), s)
+}
+
+fn load_params(prefix: &str) -> io::Result<PrefixParams> {
+    let s = fs::read_to_string(params_path(prefix))?;
+    Ok(serde_json::from_str(&s).unwrap())
 }
 
 /// Strict, order-preserving parallel sketching:
@@ -136,6 +155,8 @@ where
 
     F: Fn(&Kmer) -> <Kmer as CompressedKmerT>::Val + Send + Sync + Copy,
 {
+    // We keep a local Vec<(original_index, signature)> and then sort by index
+    // to guarantee that final vectors follow file_paths order exactly.
     let mut indexed: Vec<(usize, Vec<u16>)> = file_paths
         .par_iter()
         .enumerate()
@@ -169,7 +190,7 @@ where
 }
 
 /// Canonicalize (min(kmer, revcomp)) -> pack -> XXH3 -> return Kmer::Val (u32/u64).
-/// Safe for k=32 (never shifts by 64).
+/// Safe for k<=32 (never shifts by 64).
 pub fn make_xxh3_canonical_kmer_hash_fn<Kmer>(
     seed: u64,
 ) -> impl Fn(&Kmer) -> Kmer::Val + Copy + Send + Sync
@@ -212,12 +233,13 @@ where
 }
 
 /// Dispatch sketching by k-mer size.
-/// Key fix: build the sketcher with the SAME Kmer type as the branch.
+/// Fixed Sig=u16 for the sketcher output.
 fn sketch_with_kmer_dispatch_u16(
     paths: &[String],
     kmer_size: usize,
     sketch_size: usize,
     densification: usize, // 0 optdens, 1 revoptdens
+    hash_seed: u64,
 ) -> Vec<Vec<u16>> {
     let sketch_args = SeqSketcherParams::new(
         kmer_size,
@@ -225,8 +247,6 @@ fn sketch_with_kmer_dispatch_u16(
         SketchAlgo::OPTDENS, // label; actual is controlled by sketcher type
         DataType::DNA,
     );
-
-    let hash_seed: u64 = 1337;
 
     if kmer_size <= 14 {
         let kmer_hash_fn = make_xxh3_canonical_kmer_hash_fn::<Kmer32bit>(hash_seed);
@@ -275,20 +295,12 @@ fn sketch_with_kmer_dispatch_u16(
     }
 }
 
-fn save_params(prefix: &str, p: &PrefixParams) -> io::Result<()> {
-    let s = serde_json::to_string_pretty(p).unwrap();
-    fs::write(params_path(prefix), s)
-}
-
-fn load_params(prefix: &str) -> io::Result<PrefixParams> {
-    let s = fs::read_to_string(params_path(prefix))?;
-    Ok(serde_json::from_str(&s).unwrap())
-}
-
+/// Write search results as TSV.
+/// `hits`: Vec[(query_index, [(vector_id, hamming_dist)])]
 fn write_search_results(
     mut out: Box<dyn Write>,
     query_paths: &[String],
-    hits: &[(usize, Vec<(u32, f32)>)], // (query_index, [(id, dist)])
+    hits: &[(usize, Vec<(u32, f32)>)],
     ref_genomes: &[String],
 ) -> io::Result<()> {
     writeln!(out, "Query\tHit\tVectorID\tRawJaccard\tHammingDist")?;
@@ -305,6 +317,40 @@ fn write_search_results(
         }
     }
     Ok(())
+}
+
+/// Small internal sanity check: take a few reference vectors and query them
+/// back against the index. This is just to confirm DiskANN's ID mapping
+/// is consistent with our 0..n-1 order. No CLI flag, just stderr logs.
+fn sanity_check_index_mapping(
+    idx: &DiskANN<u16, DistHamming>,
+    vectors: &[Vec<u16>],
+    num_checks: usize,
+    build_beam_width: usize,
+) {
+    let n = vectors.len();
+    if n == 0 {
+        eprintln!("SANITY: index has 0 vectors, skipping sanity check.");
+        return;
+    }
+    let checks = n.min(num_checks.max(1));
+    let beam = build_beam_width.max(64);
+
+    eprintln!(
+        "SANITY: checking mapping on {} / {} reference vectors (beam_width={})",
+        checks, n, beam
+    );
+    for i in 0..checks {
+        let nn = idx.search_with_dists(&vectors[i], 1, beam);
+        if let Some((id, dist)) = nn.first().copied() {
+            eprintln!(
+                "SANITY: ref vec {} -> nearest id {} (dist={:.6})",
+                i, id, dist
+            );
+        } else {
+            eprintln!("SANITY: ref vec {} -> search returned no neighbors", i);
+        }
+    }
 }
 
 fn main() {
@@ -374,7 +420,8 @@ fn main() {
                 .arg(
                     Arg::new("build_beam_width")
                         .long("build_beam_width")
-                        .default_value("128")
+                        // bump a bit vs 128 for high-dim u16 sketches
+                        .default_value("256")
                         .value_parser(clap::value_parser!(usize))
                         .action(ArgAction::Set),
                 )
@@ -383,6 +430,14 @@ fn main() {
                         .long("alpha")
                         .default_value("1.2")
                         .value_parser(clap::value_parser!(f32))
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("hash_seed")
+                        .long("hash_seed")
+                        .help("XXH3 seed for canonical k-mer hashing (MUST match between build & search)")
+                        .default_value("1337")
+                        .value_parser(clap::value_parser!(u64))
                         .action(ArgAction::Set),
                 ),
         )
@@ -415,7 +470,8 @@ fn main() {
                     Arg::new("beam_width")
                         .long("beam_width")
                         .help("Search beam width")
-                        .default_value("64")
+                        // default reasonably large; override if needed
+                        .default_value("384")
                         .value_parser(clap::value_parser!(usize))
                         .action(ArgAction::Set),
                 )
@@ -453,22 +509,44 @@ fn main() {
             let build_beam_width = *m.get_one::<usize>("build_beam_width").unwrap();
             let alpha = *m.get_one::<f32>("alpha").unwrap();
 
+            let hash_seed = *m.get_one::<u64>("hash_seed").unwrap();
+
             init_rayon_global(threads);
 
             let ref_genomes = read_list_file(&reference_list);
+            eprintln!(
+                "Building index for {} reference genomes (k={}, sketch_size={}, dens={}, seed={})",
+                ref_genomes.len(),
+                kmer_size,
+                sketch_size,
+                dens,
+                hash_seed
+            );
 
-            // Save genome list in the exact input order (this will define vector IDs)
+            // Save genome list in the exact input order (this defines vector IDs)
             let genomes_file = genomes_path(&prefix);
             write_genome_list(&genomes_file, &ref_genomes).expect("failed writing genomes list");
 
             // Sketch reference genomes (order preserved)
-            let vectors_u16 =
-                sketch_with_kmer_dispatch_u16(&ref_genomes, kmer_size, sketch_size, dens);
+            let vectors_u16 = sketch_with_kmer_dispatch_u16(
+                &ref_genomes,
+                kmer_size,
+                sketch_size,
+                dens,
+                hash_seed,
+            );
             assert_eq!(
                 vectors_u16.len(),
                 ref_genomes.len(),
                 "sketch count mismatch vs genomes list order"
             );
+            if !vectors_u16.is_empty() {
+                eprintln!(
+                    "Sketched {} vectors, dim={} (u16)",
+                    vectors_u16.len(),
+                    vectors_u16[0].len()
+                );
+            }
 
             // Build DiskANN with DistHamming<u16>
             let idx_file = index_path(&prefix);
@@ -478,13 +556,21 @@ fn main() {
                 alpha,
             };
 
-            let _idx = DiskANN::<u16, DistHamming>::build_index_with_params(
+            let idx = DiskANN::<u16, DistHamming>::build_index_with_params(
                 &vectors_u16,
                 DistHamming,
                 &idx_file,
                 params,
             )
             .expect("DiskANN build failed");
+
+            eprintln!(
+                "OK: built {} (num_vectors={}, dim={})",
+                idx_file, idx.num_vectors, idx.dim
+            );
+
+            // Internal sanity check: do a few ref->ref queries to see mapping.
+            sanity_check_index_mapping(&idx, &vectors_u16, 3, build_beam_width);
 
             // Write params json
             let pp = PrefixParams {
@@ -498,11 +584,16 @@ fn main() {
                 sketch_elem_size: 2,
                 sketch_elem_type: "u16".to_string(),
                 distance: "anndists::dist::DistHamming".to_string(),
+                hash_seed,
             };
             save_params(&prefix, &pp).expect("failed writing params");
 
-            eprintln!("OK: built {idx_file}");
-            eprintln!("OK: genomes order {genomes_file}");
+            // Write idmap.tsv using the same genome order
+            let idmap_file = idmap_path(&prefix);
+            write_idmap_tsv(&idmap_file, &ref_genomes).expect("failed writing idmap");
+
+            eprintln!("OK: genomes order {}", genomes_file);
+            eprintln!("OK: idmap {}", idmap_file);
             eprintln!("OK: params {}", params_path(&prefix));
         }
 
@@ -527,14 +618,34 @@ fn main() {
                 read_genome_list(&genomes_path(&prefix)).expect("failed reading genomes list");
 
             // Open index
-            let idx = DiskANN::<u16, DistHamming>::open_index_with(
-                &index_path(&prefix),
-                DistHamming,
-            )
-            .expect("failed opening index");
+            let idx =
+                DiskANN::<u16, DistHamming>::open_index_with(&index_path(&prefix), DistHamming)
+                    .expect("failed opening index");
+
+            eprintln!(
+                "Opened index: num_vectors={}, dim={}, metric=Hamming<u16>",
+                idx.num_vectors, idx.dim
+            );
+            eprintln!(
+                "Ref genomes: {}, queries_from_list: {:?}, k={}, beam_width={}, threads={}",
+                ref_genomes.len(),
+                query_list,
+                k,
+                beam_width,
+                threads
+            );
+
+            if idx.num_vectors != ref_genomes.len() {
+                eprintln!(
+                    "WARNING: index num_vectors ({}) != ref_genomes.len() ({})",
+                    idx.num_vectors,
+                    ref_genomes.len()
+                );
+            }
 
             // Read query list
             let query_genomes = read_list_file(&query_list);
+            eprintln!("Sketching {} query genomes…", query_genomes.len());
 
             // Sketch queries (order preserved; match params)
             let query_vectors_u16 = sketch_with_kmer_dispatch_u16(
@@ -542,7 +653,15 @@ fn main() {
                 pp.kmer_size,
                 pp.sketch_size,
                 pp.densification,
+                pp.hash_seed,
             );
+            if !query_vectors_u16.is_empty() {
+                eprintln!(
+                    "Query vector dim={} (must match index dim={})",
+                    query_vectors_u16[0].len(),
+                    idx.dim
+                );
+            }
 
             // Search each query
             let hits: Vec<(usize, Vec<(u32, f32)>)> = query_vectors_u16
@@ -557,7 +676,8 @@ fn main() {
             // Output
             let out: Box<dyn Write> = match output {
                 Some(path) => Box::new(BufWriter::new(
-                    File::create(path).expect("cannot create output"),
+                    File::create(&path)
+                        .unwrap_or_else(|e| panic!("cannot create output {path}: {e}")),
                 )),
                 None => Box::new(BufWriter::new(io::stdout())),
             };
