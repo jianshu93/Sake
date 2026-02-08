@@ -390,7 +390,7 @@ fn main() {
                     Arg::new("sketch_size")
                         .long("sketch_size")
                         .short('s')
-                        .default_value("16384")
+                        .default_value("2048")
                         .value_parser(clap::value_parser!(usize))
                         .action(ArgAction::Set),
                 )
@@ -414,7 +414,7 @@ fn main() {
                 .arg(
                     Arg::new("max_degree")
                         .long("max_degree")
-                        .default_value("64")
+                        .default_value("128")
                         .value_parser(clap::value_parser!(usize))
                         .action(ArgAction::Set),
                 )
