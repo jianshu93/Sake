@@ -390,7 +390,7 @@ fn main() {
                     Arg::new("sketch_size")
                         .long("sketch_size")
                         .short('s')
-                        .default_value("2048")
+                        .default_value("8192")
                         .value_parser(clap::value_parser!(usize))
                         .action(ArgAction::Set),
                 )
@@ -414,7 +414,7 @@ fn main() {
                 .arg(
                     Arg::new("max_degree")
                         .long("max_degree")
-                        .default_value("128")
+                        .default_value("256")
                         .value_parser(clap::value_parser!(usize))
                         .action(ArgAction::Set),
                 )
@@ -422,14 +422,14 @@ fn main() {
                     Arg::new("build_beam_width")
                         .long("build_beam_width")
                         // bump a bit vs 128 for high-dim u16 sketches
-                        .default_value("256")
+                        .default_value("512")
                         .value_parser(clap::value_parser!(usize))
                         .action(ArgAction::Set),
                 )
                 .arg(
                     Arg::new("alpha")
                         .long("alpha")
-                        .default_value("1.2")
+                        .default_value("1.8")
                         .value_parser(clap::value_parser!(f32))
                         .action(ArgAction::Set),
                 )
@@ -472,7 +472,7 @@ fn main() {
                         .long("beam_width")
                         .help("Search beam width")
                         // default reasonably large; override if needed
-                        .default_value("384")
+                        .default_value("512")
                         .value_parser(clap::value_parser!(usize))
                         .action(ArgAction::Set),
                 )
