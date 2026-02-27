@@ -104,6 +104,8 @@ struct PrefixParams {
     max_degree: usize,
     build_beam_width: usize,
     alpha: f32,
+    passes: usize,       
+    extra_seeds: usize, 
 
     // type info (we fix u16)
     sketch_elem_size: u8,
@@ -358,12 +360,12 @@ fn main() {
     let _ = env_logger::Builder::from_default_env().try_init();
 
     let matches = Command::new("sake")
-        .version("0.1.0")
+        .version("0.2.0")
         .about("lightning-fast and space-efficient genome search index based on DiskANN and b-bit One Permutation MinHash")
         .subcommand_required(true)
         .subcommand(
             Command::new("todiskann")
-                .about("Build DiskANN index from genome sketches")
+                .about("Build DiskANN index from genomes, genomes will be sketched first")
                 .arg(
                     Arg::new("prefix")
                         .long("prefix")
@@ -434,6 +436,22 @@ fn main() {
                         .action(ArgAction::Set),
                 )
                 .arg(
+                    Arg::new("passes")
+                        .long("passes")
+                        .help("Number of refinement passes during DiskANN graph build (>=1)")
+                        .default_value("2")
+                        .value_parser(clap::value_parser!(usize))
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("extra_seeds")
+                        .long("extra_seeds")
+                        .help("Extra random seeds per node per pass during DiskANN build (>=0)")
+                        .default_value("2")
+                        .value_parser(clap::value_parser!(usize))
+                        .action(ArgAction::Set),
+                )
+                .arg(
                     Arg::new("hash_seed")
                         .long("hash_seed")
                         .help("XXH3 seed for canonical k-mer hashing (MUST match between build & search)")
@@ -444,7 +462,7 @@ fn main() {
         )
         .subcommand(
             Command::new("search")
-                .about("Search query genomes against an existing DiskANN index")
+                .about("Search query genomes against an existing DiskANN index, query genomes will be sketched first")
                 .arg(
                     Arg::new("prefix")
                         .long("prefix")
@@ -509,19 +527,22 @@ fn main() {
             let max_degree = *m.get_one::<usize>("max_degree").unwrap();
             let build_beam_width = *m.get_one::<usize>("build_beam_width").unwrap();
             let alpha = *m.get_one::<f32>("alpha").unwrap();
-
+            let passes = *m.get_one::<usize>("passes").unwrap();
+            let extra_seeds = *m.get_one::<usize>("extra_seeds").unwrap();
             let hash_seed = *m.get_one::<u64>("hash_seed").unwrap();
 
             init_rayon_global(threads);
 
             let ref_genomes = read_list_file(&reference_list);
             eprintln!(
-                "Building index for {} reference genomes (k={}, sketch_size={}, dens={}, seed={})",
+                "Building index for {} reference genomes (k={}, sketch_size={}, dens={}, seed={}, passes={}, extra_seeds={})",
                 ref_genomes.len(),
                 kmer_size,
                 sketch_size,
                 dens,
-                hash_seed
+                hash_seed,
+                passes,
+                extra_seeds
             );
 
             // Save genome list in the exact input order (this defines vector IDs)
@@ -555,6 +576,8 @@ fn main() {
                 max_degree,
                 build_beam_width,
                 alpha,
+                passes,
+                extra_seeds,
             };
 
             let idx = DiskANN::<u16, DistHamming>::build_index_with_params(
@@ -582,6 +605,8 @@ fn main() {
                 max_degree,
                 build_beam_width,
                 alpha,
+                passes,
+                extra_seeds,
                 sketch_elem_size: 2,
                 sketch_elem_type: "u16".to_string(),
                 distance: "anndists::dist::DistHamming".to_string(),
