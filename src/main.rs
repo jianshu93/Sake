@@ -71,7 +71,6 @@ fn ascii_to_seq(bases: &[u8]) -> Result<SequenceStruct, ()> {
 }
 
 /// Converts ASCII-encoded amino-acid sequence into `SequenceAA`.
-/// Converts ASCII-encoded amino-acid sequence into `SequenceAA`.
 /// - uppercases all residues
 /// - drops any residue not in the 20-AA alphabet (ACDEFGHIKLMNPQRSTVWY),
 ///   including '*', 'X', gaps, etc.
