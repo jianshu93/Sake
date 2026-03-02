@@ -1,20 +1,19 @@
-# Sake: Rapid and Scalable Genome Search with On-disk Indexes
-Sake (pronouced as Sah-key) is a lightning-fast and space-efficient genome search index based on DiskANN and b-bit One Permutation MinHash. I coded most of it when drinking Sake.
+# Granne: Graph-based Approximate Nearest Neighbor using On-disk indexes for Rapid and Scalable Genome Search
+Granne (***GR***aph-based ***A***pproximate ***N***earest ***NE***ighbor, it means neighbor in Swedish) is a lightning-fast and space-efficient genome nearest neighbor search index based on DiskANN and b-bit One Permutation MinHash.
+
 
 
 ## Install
 ```bash
-git clone https://github.com/jianshu93/Sake
+git clone https://github.com/jianshu93/Granne
 cd Sake
 cargo build --release
-./target/release/sake -h
-
-
+./target/release/granne -h
 ```
 
 ## usage
 ```bash
-$ sake -h
+$ granne -h
 
  ************** initializing logger *****************
 
